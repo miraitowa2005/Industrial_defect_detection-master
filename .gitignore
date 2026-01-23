@@ -1,0 +1,28 @@
+# 忽略 Python 缓存
+__pycache__/
+*.py[cod]
+
+# 忽略数据集
+datasets/
+data/
+*.jpg
+*.png
+*.bmp
+
+# 忽略模型权重 (关键是下面这几行！)
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.h5
+
+# 忽略压缩包和中间文件 (针对你图片里的文件)
+*.tar
+*.gz
+*.zip
+*.rar
+checkpoint*
+
+# 忽略 IDE 配置
+.vscode/
+.idea/
