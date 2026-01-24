@@ -21,15 +21,14 @@ model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
-cls_list = ['0_scratch',
-            '1_gline',
-            '2_bubble',
-            '3_defect',
-            '4_unformed',
-            '5_foreign_matter',
-            '6_burr',
-            '7_lr',
-            '8_pin']
+cls_list = [
+    'crazing',
+    'inclusion',
+    'patches',
+    'pitted_surface',
+    'rolled-in_scale',
+    'scratches'
+]
 
 def parse():
     args = argparse.ArgumentParser('model eval')
@@ -58,8 +57,12 @@ def cal_acc(dataloader, model, num_classes, device, include_classes=None):
     accuracy = AverageMeter()
     model.eval()
 
-    cls_count = np.zeros(num_classes, dtype=np.float32)
-    cls_correct = np.zeros(num_classes, dtype=np.float32)
+    # Metrics initialization
+    tp = np.zeros(num_classes, dtype=np.float32)
+    gt_counts = np.zeros(num_classes, dtype=np.float32) # TP + FN
+    pred_counts = np.zeros(num_classes, dtype=np.float32) # TP + FP
+    
+    start_time = time.time()
 
     with torch.no_grad():
         for i, (images, labels) in enumerate(dataloader):
@@ -68,16 +71,18 @@ def cal_acc(dataloader, model, num_classes, device, include_classes=None):
             labels = labels.to(device)
             outputs = model(images)
 
-            for gt_label in labels:
-                cls_count[int(gt_label.item())] += 1
-
             _, preds = torch.max(outputs, 1)
-            for corr_pred in labels[preds == labels.data]:
-                cls_correct[int(corr_pred.item())] += 1
+
+            for j in range(batch_size):
+                label = int(labels[j].item())
+                pred = int(preds[j].item())
+                
+                gt_counts[label] += 1
+                pred_counts[pred] += 1
+                if label == pred:
+                    tp[label] += 1
 
             acc = torch.mean((preds == labels.data).float())
-            cls_acc = cls_correct / (cls_count + 1e-8)
-
             accuracy.update(acc.item(), batch_size)
 
             print(time.strftime('%m/%d %H:%M:%S', time.localtime()), end='\t')
@@ -86,22 +91,34 @@ def cal_acc(dataloader, model, num_classes, device, include_classes=None):
                   .format(i + 1, len(dataloader),
                           acc=accuracy), flush=True)
 
+    end_time = time.time()
+    total_time = end_time - start_time
+    print(f'\nTotal Inference Time: {total_time:.4f}s')
+    print(f'Average Inference Time per Batch: {total_time/len(dataloader):.4f}s')
+    print(f'FPS: {len(dataloader.dataset)/total_time:.2f}')
+
+    # Calculate Metrics
+    precision = tp / (pred_counts + 1e-8)
+    recall = tp / (gt_counts + 1e-8)
+    f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
+    cls_acc = tp / (gt_counts + 1e-8)
+
     # 计算指定类别的整体准确率
     if include_classes is None:
         # 如果没有指定，只考虑有样本的类别
-        include_classes = np.where(cls_count > 0)[0]
+        include_classes = np.where(gt_counts > 0)[0]
     else:
         # 确保只包含有样本的指定类别
-        include_classes = np.array([c for c in include_classes if cls_count[c] > 0])
+        include_classes = np.array([c for c in include_classes if gt_counts[c] > 0])
 
     if len(include_classes) > 0:
-        total_included_samples = np.sum(cls_count[include_classes])
-        total_correct_included = np.sum(cls_correct[include_classes])
+        total_included_samples = np.sum(gt_counts[include_classes])
+        total_correct_included = np.sum(tp[include_classes])
         included_acc = total_correct_included / total_included_samples
     else:
         included_acc = 0.0
 
-    return included_acc, cls_acc
+    return included_acc, cls_acc, precision, recall, f1
 
 
 def eval(data_root, data_list, checkpoint, arch, batch_size, num_workers, include_classes=None):

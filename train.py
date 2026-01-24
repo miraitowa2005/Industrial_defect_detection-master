@@ -16,6 +16,15 @@ import shutil
 import math
 
 import models
+# 临时兼容性处理：如果 models 模块中没有定义 resnet50，则使用 torchvision.models
+try:
+    if 'resnet50' not in models.__dict__:
+        import torchvision.models as torch_models
+        models = torch_models
+except Exception:
+    import torchvision.models as torch_models
+    models = torch_models
+
 from config import Args
 from dataset import ImageListDataset
 
@@ -195,77 +204,69 @@ def main(args):
     else:
         print("Use CPU for training.")
 
-    # model - 手动加载预训练权重
+    # model - 使用 torchvision 官方模型加载逻辑
     import torchvision.models as torch_models
-    
-    # 对于我们自己实现的模型，使用models.__dict__
-    if args.arch in models.__dict__:
-        model = models.__dict__[args.arch](pretrained=False)
-    # 对于torchvision中没有重写的模型，直接使用torch_models
-    elif args.arch in torch_models.__dict__:
-        model = torch_models.__dict__[args.arch](pretrained=False)
-    else:
-        raise ValueError(f"不支持的模型架构: {args.arch}")
-    
-    # 根据不同模型结构获取特征提取层和分类层
-    if hasattr(model, 'fc'):  # ResNet, ResNeXt等
+
+    # 1. 强制使用 torchvision 的官方模型和权重
+    print(f"Loading pretrained {args.arch} from torchvision...")
+    # 注意：PyTorch 新版本建议使用 weights 参数，旧版本使用 pretrained=True
+    try:
+        # 尝试新版写法 (PyTorch 0.13+)
+        if args.arch == 'resnet50':
+             weights = torch_models.ResNet50_Weights.DEFAULT
+             model = torch_models.resnet50(weights=weights)
+        else:
+             # 回退旧版写法
+             model = torch_models.__dict__[args.arch](pretrained=True)
+    except:
+        # 回退旧版写法
+        try:
+            model = torch_models.__dict__[args.arch](pretrained=True)
+        except Exception as e:
+            print(f"Error loading model from torchvision: {e}")
+            # 最后尝试从本地 models 加载 (如果不带权重)
+            if args.arch in models.__dict__:
+                print("Falling back to local models (no pretrained weights)...")
+                model = models.__dict__[args.arch](pretrained=False)
+            else:
+                raise e
+
+    # 2. 替换分类层 (针对 ResNet)
+    if hasattr(model, 'fc'):
         num_ftrs = model.fc.in_features
-        # 添加Dropout层作为正则化
         model.fc = nn.Sequential(
-            nn.Dropout(p=0.5),
+            nn.Dropout(p=0.5),  # 你原本加的 Dropout 很好，保留
             nn.Linear(num_ftrs, args.num_classes)
         )
         classifier_name = 'fc'
-    elif hasattr(model, 'classifier'):  # EfficientNet, MobileNetV3等
-        # 处理EfficientNet的分类器结构
-        if args.arch.startswith('efficientnet'):
-            num_ftrs = model.classifier[1].in_features
-            # 在分类器中添加Dropout
-            model.classifier[1] = nn.Sequential(
-                nn.Dropout(p=0.5),
-                nn.Linear(num_ftrs, args.num_classes)
-            )
-        # 处理MobileNetV3的分类器结构
-        elif args.arch.startswith('mobilenet_v3'):
-            num_ftrs = model.classifier[3].in_features
-            # 在分类器中添加Dropout
-            model.classifier[3] = nn.Sequential(
-                nn.Dropout(p=0.5),
-                nn.Linear(num_ftrs, args.num_classes)
-            )
+    elif hasattr(model, 'classifier'):
         classifier_name = 'classifier'
+        if isinstance(model.classifier, nn.Sequential):
+             num_ftrs = model.classifier[-1].in_features
+             model.classifier[-1] = nn.Sequential(
+                nn.Dropout(p=0.5),
+                nn.Linear(num_ftrs, args.num_classes)
+             )
+        else:
+             num_ftrs = model.classifier.in_features
+             model.classifier = nn.Sequential(
+                nn.Dropout(p=0.5),
+                nn.Linear(num_ftrs, args.num_classes)
+             )
     else:
-        raise ValueError(f"模型 {args.arch} 没有标准的分类层结构")
-    
-    # 手动加载预训练权重并处理差异
-    if args.arch in torch_models.__dict__:
-        # 加载原始模型的预训练权重
-        pretrained_model = torch_models.__dict__[args.arch](pretrained=True)
-        pretrained_state_dict = pretrained_model.state_dict()
-        
-        # 复制预训练权重，跳过最后的分类层
-        model_state_dict = model.state_dict()
-        for name, param in pretrained_state_dict.items():
-            # 跳过分类层的权重
-            if classifier_name == 'fc' and (name == 'fc.weight' or name == 'fc.bias'):
-                continue
-            elif classifier_name == 'classifier':
-                if args.arch.startswith('efficientnet') and name.startswith('classifier.1'):
-                    continue
-                elif args.arch.startswith('mobilenet_v3') and name.startswith('classifier.3'):
-                    continue
-            
-            if name in model_state_dict:
-                try:
-                    model_state_dict[name].copy_(param)
-                except:
-                    print(f"跳过权重: {name} (形状不匹配)")
-    
-    print("预训练权重加载完成")
+        raise ValueError(f"Model {args.arch} structure not supported for auto-finetuning.")
+
+    print("Model loaded and fc layer replaced.")
 
     if use_cuda:
         model = torch.nn.DataParallel(model).cuda()
-        # 回退到标准的交叉熵损失，比Focal Loss更稳定
+        # 增加类别权重，处理类别不平衡
+        # 假设类别0样本最多，给它较低的权重，其他类别较高的权重
+        # 这是一个简单的示例，实际应根据数据集统计
+        # class_weights = torch.ones(args.num_classes).cuda()
+        # class_weights[0] = 0.5 # 假设第0类是正常样本或最多的
+        
+        # 使用标准交叉熵损失
         criterion = nn.CrossEntropyLoss().cuda()
     else:
         model = model.cpu()
@@ -283,15 +284,17 @@ def main(args):
         model.load_state_dict(state['model'])
         optimizer.load_state_dict(state['optimizer'])
 
-    # 优化数据增强策略：去除模糊，减少过度裁剪
+    # 优化数据增强策略：增强数据扰动以防止过拟合
     train_transforms = transforms.Compose([
         transforms.Resize((256, 256)),
-        # 改为RandomCrop以保留原始比例，避免缺陷变形
+        # RandomCrop保留原始比例
         transforms.RandomCrop(224),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomVerticalFlip(p=0.5),
-        # 减弱颜色抖动，工业环境光照通常受控
-        transforms.ColorJitter(brightness=0.1, contrast=0.1),
+        # 增加随机旋转
+        transforms.RandomRotation(degrees=15),
+        # 增强颜色抖动，提高光照鲁棒性
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
         transforms.ToTensor(),
         # 使用适合RGB图像的归一化参数
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -314,11 +317,29 @@ def main(args):
                                 num_workers=args.num_workers, pin_memory=True)
 
     # 早停策略参数
-    patience = 10
+    patience = 25 # 增加 patience
     no_improve_epoch = 0
     best_val_loss = float('inf')
     
+    # 冻结Backbone，只训练FC层 (前5个Epoch)
+    print("冻结Backbone，只训练分类层...")
+    for name, param in model.named_parameters():
+        # 这里假设fc层名字包含 'fc' 或 'classifier'，根据前面定义的 classifier_name
+        if classifier_name not in name:
+            param.requires_grad = False
+    
+    # 验证冻结情况
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"当前可训练参数量: {trainable_params}")
+
     for epoch in range(args.start_epoch, args.epoch):
+        # 第6个epoch开始解冻所有层
+        if epoch == 5:
+            print("解冻所有层，开始微调...")
+            for param in model.parameters():
+                param.requires_grad = True
+            # 此时可以适当降低学习率，或者依赖scheduler
+        
         global best_acc
         train(train_loader, model, criterion, optimizer, epoch, args, scaler)
         state = {
