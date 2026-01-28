@@ -1,0 +1,5 @@
+path: D:/MachineLearning/ComputerVersion/Industrial_defect_detection-master/NEU-DET
+train: train/images
+val: validation/images
+nc: 6
+names: ['crazing', 'inclusion', 'patches', 'pitted_surface', 'rolled-in_scale', 'scratches']
