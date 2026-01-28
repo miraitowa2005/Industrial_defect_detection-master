@@ -22,9 +22,9 @@ except Exception:
 
 def main():
     parser = argparse.ArgumentParser(description="Train YOLOv8 on NEU-DET dataset")
-    parser.add_argument("--weights", default="yolov8n.pt", help="Pretrained weights to start from")
+    parser.add_argument("--weights", default="yolov8s.pt", help="Pretrained weights to start from")
     parser.add_argument("--data", default="neu_det.yaml", help="Dataset YAML path")
-    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
+    parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
     parser.add_argument("--imgsz", type=int, default=640, help="Input image size")
     parser.add_argument("--batch", type=int, default=16, help="Batch size")
     parser.add_argument("--device", default="0", help="Device id, e.g., '0' or 'cpu'")
